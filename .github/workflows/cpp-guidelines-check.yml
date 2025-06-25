@@ -1,0 +1,223 @@
+name: C++ Code Guidelines Check with AI Analysis
+
+on:
+  pull_request:
+    paths:
+      - '**/*.cpp'
+      - '**/*.cc'
+      - '**/*.cxx'
+      - '**/*.c'
+      - '**/*.hpp'
+      - '**/*.h'
+      - '**/*.hxx'
+
+jobs:
+  cpp-guidelines-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch full history for comparison
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Get changed C++ files
+      id: changed-files
+      run: |
+        # Get list of changed C++ files
+        CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | grep -E '\.(cpp|cc|cxx|c|hpp|h|hxx)$' | tr '\n' ' ')
+        echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+        echo "Changed C++ files: $CHANGED_FILES"
+    
+    - name: Run C++ Guidelines Analyzer with AI
+      id: analysis
+      if: steps.changed-files.outputs.files != ''
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      run: |
+        # Run analysis with AI if API key is available, otherwise traditional analysis
+        if [ -n "$GROQ_API_KEY" ]; then
+          echo "🤖 Running analysis with AI enhancement..."
+          python3 cpp_code_analyzer.py --format json --output analysis_result.json ${{ steps.changed-files.outputs.files }}
+          python3 cpp_code_analyzer.py --format text --output analysis_report.txt ${{ steps.changed-files.outputs.files }}
+        else
+          echo "⚠️  No GROQ_API_KEY found - running traditional analysis only"
+          python3 cpp_code_analyzer.py --disable-ai --format json --output analysis_result.json ${{ steps.changed-files.outputs.files }}
+          python3 cpp_code_analyzer.py --disable-ai --format text --output analysis_report.txt ${{ steps.changed-files.outputs.files }}
+        fi
+        
+        # Set outputs for later steps
+        ERRORS=$(python3 -c "import json; data=json.load(open('analysis_result.json')); print(data['guidelines_analysis']['summary']['errors'])")
+        WARNINGS=$(python3 -c "import json; data=json.load(open('analysis_result.json')); print(data['guidelines_analysis']['summary']['warnings'])")
+        TOTAL=$(python3 -c "import json; data=json.load(open('analysis_result.json')); print(data['guidelines_analysis']['summary']['total_violations'])")
+        AI_ENABLED=$(python3 -c "import json; data=json.load(open('analysis_result.json')); print(str(data['ai_analysis']['enabled']).lower())")
+        
+        echo "errors=$ERRORS" >> $GITHUB_OUTPUT
+        echo "warnings=$WARNINGS" >> $GITHUB_OUTPUT
+        echo "total=$TOTAL" >> $GITHUB_OUTPUT
+        echo "ai_enabled=$AI_ENABLED" >> $GITHUB_OUTPUT
+    
+    - name: Upload analysis results
+      if: steps.changed-files.outputs.files != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: cpp-analysis-results
+        path: |
+          analysis_result.json
+          analysis_report.txt
+    
+    - name: Find existing comment
+      if: steps.changed-files.outputs.files != ''
+      uses: actions/github-script@v6
+      id: find-comment
+      with:
+        script: |
+          const comments = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.data.find(comment => 
+            comment.user.type === 'Bot' && 
+            (comment.body.includes('📋 C++ Code Guidelines Analysis Results') || 
+             comment.body.includes('📋 Comprehensive Code Analysis Report'))
+          );
+          
+          return botComment ? botComment.id : null;
+    
+    - name: Update or create comprehensive PR comment
+      if: steps.changed-files.outputs.files != ''
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Read the analysis results
+          const analysisData = JSON.parse(fs.readFileSync('analysis_result.json', 'utf8'));
+          const reportText = fs.readFileSync('analysis_report.txt', 'utf8');
+          const aiEnabled = '${{ steps.analysis.outputs.ai_enabled }}' === 'true';
+          
+          // Create comment body with AI-enhanced format
+          let commentBody = `## 📋 ${aiEnabled ? 'Comprehensive Code Analysis Report' : 'C++ Code Guidelines Analysis Results'}\n\n`;
+          commentBody += `*Last updated: ${new Date().toISOString()}*\n\n`;
+          
+          if (aiEnabled) {
+            commentBody += `🤖 **AI Analysis**: Enabled\n\n`;
+          } else {
+            commentBody += `⚠️ **AI Analysis**: Disabled (No GROQ_API_KEY found)\n\n`;
+          }
+          
+          // Add guidelines summary
+          const summary = analysisData.guidelines_analysis.summary;
+          commentBody += `### 📏 Guidelines Compliance\n`;
+          commentBody += `- 🔴 **Errors**: ${summary.errors}\n`;
+          commentBody += `- 🟡 **Warnings**: ${summary.warnings}\n`;
+          commentBody += `- 🔵 **Info**: ${summary.info}\n`;
+          commentBody += `- **Total**: ${summary.total_violations} violations\n\n`;
+          
+          // Add AI analysis summary if available
+          if (aiEnabled && analysisData.ai_analysis.analyses.length > 0) {
+            const aiAnalyses = analysisData.ai_analysis.analyses;
+            const avgScore = aiAnalyses.reduce((sum, a) => sum + a.overall_score, 0) / aiAnalyses.length;
+            const avgMaintainability = aiAnalyses.reduce((sum, a) => sum + a.maintainability_score, 0) / aiAnalyses.length;
+            
+            commentBody += `### 🤖 AI Code Analysis\n`;
+            commentBody += `- **Average Quality Score**: ${avgScore.toFixed(1)}/10\n`;
+            commentBody += `- **Average Maintainability**: ${avgMaintainability.toFixed(1)}/10\n`;
+            commentBody += `- **Files Analyzed**: ${aiAnalyses.length}\n\n`;
+          }
+          
+          if (summary.total_violations === 0 && (!aiEnabled || analysisData.ai_analysis.analyses.length === 0)) {
+            commentBody += `✅ **Great job!** No guideline violations found.\n`;
+          } else {
+            // Add status indicator
+            if (summary.errors > 0) {
+              commentBody += `❌ **Status**: BLOCKING - This PR cannot be merged due to errors\n\n`;
+            } else if (summary.warnings > 0) {
+              commentBody += `⚠️ **Status**: REVIEW REQUIRED - This PR has warnings that should be addressed\n\n`;
+            }
+            
+            commentBody += `<details>\n<summary>📝 Detailed Report (click to expand)</summary>\n\n`;
+            commentBody += `\`\`\`\n${reportText}\n\`\`\`\n\n</details>\n`;
+            
+            // Add quick fixes section
+            commentBody += `\n### 💡 Quick Fixes\n`;
+            commentBody += `Some common issues and their fixes:\n`;
+            commentBody += `- **Naming**: Use PascalCase for classes/functions, camelCase for variables, m_ prefix for members\n`;
+            commentBody += `- **Headers**: Add include guards (#pragma once) and avoid 'using namespace std'\n`;
+            commentBody += `- **Modern C++**: Use smart pointers instead of raw pointers, prefer nullptr over NULL\n`;
+            commentBody += `- **Comments**: Add Doxygen-style comments for public functions in headers\n`;
+            
+            if (aiEnabled) {
+              commentBody += `\n---\n*This analysis combines traditional C++ guidelines checking with AI-powered insights for comprehensive code review.*`;
+            }
+          }
+          
+          // Update existing comment or create new one
+          const existingCommentId = ${{ steps.find-comment.outputs.result }};
+          
+          if (existingCommentId) {
+            // Update existing comment
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existingCommentId,
+              body: commentBody
+            });
+            console.log('Updated existing comment');
+          } else {
+            // Create new comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+            console.log('Created new comment');
+          }
+    
+    - name: Set status based on violations
+      if: steps.changed-files.outputs.files != ''
+      run: |
+        ERRORS=${{ steps.analysis.outputs.errors }}
+        WARNINGS=${{ steps.analysis.outputs.warnings }}
+        TOTAL=${{ steps.analysis.outputs.total }}
+        AI_ENABLED=${{ steps.analysis.outputs.ai_enabled }}
+        
+        echo "Analysis Results:"
+        echo "- Errors: $ERRORS"
+        echo "- Warnings: $WARNINGS"
+        echo "- Total violations: $TOTAL"
+        echo "- AI Analysis: $AI_ENABLED"
+        
+        if [ "$ERRORS" -gt 0 ]; then
+          echo "❌ BLOCKING: Found $ERRORS error(s) in C++ code guidelines"
+          echo "This PR cannot be merged until all errors are fixed."
+          exit 1
+        elif [ "$WARNINGS" -gt 0 ]; then
+          echo "⚠️ REVIEW REQUIRED: Found $WARNINGS warning(s) in C++ code guidelines"
+          echo "Please review and address these warnings before merging."
+          exit 1
+        else
+          if [ "$AI_ENABLED" = "true" ]; then
+            echo "✅ C++ code guidelines check with AI analysis passed - no violations found"
+          else
+            echo "✅ C++ code guidelines check passed - no violations found"
+          fi
+        fi
+    
+    - name: Handle no C++ files changed
+      if: steps.changed-files.outputs.files == ''
+      run: |
+        echo "ℹ️ No C++ files were changed in this PR - skipping guidelines check" 
