@@ -1,7 +1,7 @@
 #include <iostream>
 using namespace std;
 
-class myClass {  // Should be PascalCase
+class myClass {  
 public:
     int SomeVariable;    // OK
     int BadVariableName;  // Should be snake_case or camelCase
