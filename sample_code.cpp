@@ -4,7 +4,7 @@ using namespace std;
 class myClass {  // Should be PascalCase
 public:
     int SomeVariable;    // OK
-    int BadVariableName;  // Should be snake_case or camelCase
+    int BadVariableName; 
     
     void SomeFunction() {  // Should be camelCase or snake_case
         int* m_ptr = new int(42);  // Raw pointer usage
